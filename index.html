@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>58mm Cloud POS System</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f4f6f8; margin: 0; padding: 20px; color: #333; }
+    .pos-layout { max-width: 450px; margin: 20px auto; background: white; border-radius: 12px; padding: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); }
+    h2 { text-align: center; margin-top: 0; color: #111; }
+    .badge { width: 100%; box-sizing: border-box; text-align: center; padding: 10px; border-radius: 8px; font-weight: bold; margin-bottom: 20px; font-size: 0.95rem; }
+    .status-disconnected { background: #ffebeb; color: #d93025; border: 1px solid #fadbd8; }
+    .status-connected { background: #e6f4ea; color: #137333; border: 1px solid #d4edda; }
+    .btn { display: block; width: 100%; box-sizing: border-box; padding: 14px; font-size: 1rem; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; margin-bottom: 12px; transition: background 0.2s; }
+    .btn-connect { background: #1a73e8; color: white; }
+    .btn-connect:hover { background: #1557b0; }
+    .btn-checkout { background: #1e8e3e; color: white; }
+    .btn-checkout:hover { background: #146c2e; }
+    .btn:disabled { background: #dadce0; color: #70757a; cursor: not-allowed; }
+    .cart-summary { background: #f8f9fa; border-radius: 8px; padding: 16px; margin: 20px 0; border: 1px dashed #b0b4b8; }
+    .flex-row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 0.95rem; }
+    .divider { border: 0; border-top: 1px solid #dee2e6; margin: 10px 0; }
+  </style>
+</head>
+<body>
+
+<div class="pos-layout">
+  <h2>⚡ Cloud POS System</h2>
+  <div id="printerStatus" class="badge status-disconnected">❌ Printer Offline</div>
+  
+  <button id="connectBtn" class="btn btn-connect">🔗 Pair 58mm Thermal Printer</button>
+
+  <div class="cart-summary">
+    <h3 style="margin-top:0;">Current Cart</h3>
+    <div class="flex-row"><span>1x Hot Espresso</span><span>$3.00</span></div>
+    <div class="flex-row"><span>2x Sugar Croissant</span><span>$9.00</span></div>
+    <div class="divider"></div>
+    <div class="flex-row" style="font-weight:bold; font-size:1.1rem; color:#000;"><span>Total Due</span><span>$12.00</span></div>
+  </div>
+
+  <button id="checkoutBtn" class="btn btn-checkout" disabled>💳 Process & Print Receipt</button>
+</div>
+
+<script>
+  // ⚠️ PASTE YOUR COPIED DEPLOYED GOOGLE APPS SCRIPT WEB APP URL HERE:
+  const GOOGLE_SCRIPT_API_URL = "https://script.google.com/macros/s/AKfycbziijSM4sG4lEQunxv4icHdJARYGiXzPRty8zbhHMxAvQXEsKtrULACBexxTWVVdP8q7g/exec";
+
+  let printerCharacteristic = null;
+
+  // 58mm text spacing motor (Grid target: 32 maximum characters wide)
+  function padLine58mm(leftText, rightText) {
+    const lineLimit = 32;
+    const paddingSpace = lineLimit - (leftText.length + rightText.length);
+    return paddingSpace > 0 ? leftText + " ".repeat(paddingSpace) + rightText : leftText + " " + rightText;
+  }
+
+  // Web Bluetooth hardware pairing
+  document.getElementById('connectBtn').addEventListener('click', async () => {
+    try {
+      const printerUUID = '000018f0-0000-1000-8000-00805f9b34fb';
+      
+      const device = await navigator.bluetooth.requestDevice({
+        filters: [{ services: [printerUUID] }, { namePrefix: 'XP' }, { namePrefix: 'MTP' }, { namePrefix: 'PT' }],
+        optionalServices: [printerUUID]
+      });
+
+      const server = await device.gatt.connect();
+      const service = await server.getPrimaryService(printerUUID);
+      const characteristics = await service.getCharacteristics();
+      
+      printerCharacteristic = characteristics.find(c => c.properties.write || c.properties.writeWithoutResponse);
+
+      if (printerCharacteristic) {
+        const statusEl = document.getElementById('printerStatus');
+        statusEl.innerText = "✅ Printer Ready";
+        statusEl.className = "badge status-connected";
+        document.getElementById('checkoutBtn').disabled = false;
+        document.getElementById('connectBtn').style.display = 'none';
+      } else {
+        throw new Error("No write configurations detected on printer endpoint.");
+      }
+    } catch(e) {
+      alert("Hardware binding failed: " + e.message);
+      console.error(e);
+    }
+  });
+
+  // Database posting and print flow coordination
+  document.getElementById('checkoutBtn').addEventListener('click', async () => {
+    const mockCart = [
+      { name: "Hot Espresso", qty: 1, price: 3.00 },
+      { name: "Sugar Croissant", qty: 2, price: 4.50 }
+    ];
+    const mockTotal = 12.00;
+
+    const actionButton = document.getElementById('checkoutBtn');
+    actionButton.disabled = true;
+    actionButton.innerText = "Syncing with Database...";
+
+    try {
+      // Post network data block to Apps Script
+      const networkResponse = await fetch(GOOGLE_SCRIPT_API_URL, {
+        method: "POST",
+        mode: "cors",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({ cart: mockCart, total: mockTotal })
+      });
+
+      const dbResult = await networkResponse.json();
+
+      if (dbResult.status === "Success") {
+        actionButton.innerText = "Printing Receipt...";
+        await outputToThermalHead(dbResult.orderId, mockCart, mockTotal);
+        alert("Success! Order logged under ID: " + dbResult.orderId);
+      } else {
+        throw new Error(dbResult.message);
+      }
+    } catch(err) {
+      alert("System processing failed: " + err.message);
+      console.error(err);
+    } finally {
+      actionButton.disabled = false;
+      actionButton.innerText = "💳 Process & Print Receipt";
+    }
+  });
+
+  // ESC/POS print builder engine
+  async function outputToThermalHead(invoiceId, cartArray, totalValue) {
+    const ESC = '\x1B';
+    const INIT = ESC + '\x40';
+    const CENTER = ESC + '\x61\x01';
+    const LEFT = ESC + '\x61\x00';
+    const LF = '\x0A';
+
+    let template = INIT + CENTER;
+    template += "MY CLOUD REGISTER" + LF;
+    template += "Invoice: " + invoiceId + LF;
+    template += "--------------------------------" + LF;
+    template += LEFT;
+
+    cartArray.forEach(row => {
+      let desc = `${row.qty}x ${row.name}`;
+      let extPrice = `$${(row.qty * row.price).toFixed(2)}`;
+      template += padLine58mm(desc, extPrice) + LF;
+    });
+
+    template += "--------------------------------" + LF;
+    template += padLine58mm("BALANCE DUE", `$${totalValue.toFixed(2)}`) + LF;
+    template += "--------------------------------" + LF;
+    template += CENTER + "Thank You!" + LF;
+    template += LF + LF + LF; // Paper margins for manual cutter
+
+    const uint8Payload = new TextEncoder().encode(template);
+    const writeBatchSize = 20;
+
+    for (let offset = 0; offset < uint8Payload.length; offset += writeBatchSize) {
+      const streamSlice = uint8Payload.slice(offset, offset + writeBatchSize);
+      await printerCharacteristic.writeValue(streamSlice);
+      await new Promise(r => setTimeout(r, 20)); // Flow control buffer safety
+    }
+  }
+</script>
+</body>
+</html>
